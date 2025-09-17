@@ -41,9 +41,15 @@ This project sets up a distributed system where HTTP workers communicate through
 
 4. Set up Docker containers for RabbitMQ and Redis:  
    Run the following to start RabbitMQ and Redis:
-   docker-compose up
+
+      docker-compose up
 
 5. Start the app:
+
+      npm run worker
+
+      npm run dev
+   
    This will start the server with workers based on the available CPU cores.
 
 ## API Endpoints

@@ -1,67 +1,57 @@
 import amqplib from 'amqplib';
 import { nanoid } from 'nanoid';
+import Redis from 'ioredis';
 import {
-  AMQP_URL, RPC_REQUEST_QUEUE, RPC_REPLY_QUEUE, RPC_TIMEOUT_MS
+  AMQP_URL, REDIS_URL,
+  RPC_REQUEST_QUEUE, RPC_REPLY_QUEUE, RPC_TIMEOUT_MS
 } from './utils.js';
 
-let conn, ch;
-let replyConn, replyCh;
+let channel;
+const redis = new Redis(REDIS_URL);
 
 export async function initRpcClient() {
-  conn = await amqplib.connect(AMQP_URL);
-  ch = await conn.createChannel();
-  await ch.assertQueue(RPC_REQUEST_QUEUE, { durable: true });
-
-  replyConn = await amqplib.connect(AMQP_URL);
-  replyCh = await replyConn.createChannel();
-  await replyCh.assertQueue(RPC_REPLY_QUEUE, { durable: true });
+  const conn = await amqplib.connect(AMQP_URL);
+  channel = await conn.createChannel();
+  await channel.assertQueue(RPC_REQUEST_QUEUE, { durable: true });
+  await channel.assertQueue(RPC_REPLY_QUEUE, { durable: true });
 }
 
-const pending = new Map();
-
-export async function rpcCall(payload) {
-  if (!ch || !replyCh) await initRpcClient();
-
+export async function rpcCall(workerId, payload) {
   const correlationId = nanoid();
-  const body = Buffer.from(JSON.stringify(payload));
+  const pendingKey = `rpc:pending:${correlationId}`;
+  const ttl = Math.ceil(RPC_TIMEOUT_MS / 1000) + 5;
 
-  // set up consumer once (idempotent)
-  if (!replyCh._consuming) {
-    await replyCh.consume(RPC_REPLY_QUEUE, (msg) => {
-      if (!msg) return;
-      const cid = msg.properties.correlationId;
-      const waiter = pending.get(cid);
-      if (waiter) {
-        try {
-          const data = JSON.parse(msg.content.toString());
-          waiter.resolve(data);
-        } catch (e) {
-          waiter.reject(e);
-        } finally {
-          pending.delete(cid);
-        }
-      }
-      replyCh.ack(msg);
-    });
-    replyCh._consuming = true;
-  }
+  await redis.hmset(pendingKey, { owner: String(workerId), createdAt: String(Date.now()) });
+  await redis.expire(pendingKey, ttl);
 
-  const p = new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      pending.delete(correlationId);
-      reject(new Error('RPC timeout'));
-    }, RPC_TIMEOUT_MS);
-    pending.set(correlationId, {
-      resolve: (v) => { clearTimeout(t); resolve(v); },
-      reject: (e) => { clearTimeout(t); reject(e); }
-    });
-  });
-
-  await ch.sendToQueue(
+  await channel.sendToQueue(
     RPC_REQUEST_QUEUE,
-    body,
+    Buffer.from(JSON.stringify(payload)),
     { correlationId, replyTo: RPC_REPLY_QUEUE, persistent: true }
   );
 
-  return p;
+  return new Promise((resolve, reject) => {
+    const sub = new Redis(REDIS_URL);
+    const myChan = `worker:${workerId}`;
+    const timer = setTimeout(async () => {
+      try { await redis.del(pendingKey); } catch {}
+      try { await sub.unsubscribe(myChan); sub.disconnect(); } catch {}
+      reject(new Error('RPC timeout'));
+    }, RPC_TIMEOUT_MS);
+
+    const onMsg = async (chan, message) => {
+      try {
+        const msg = JSON.parse(message);
+        if (msg.correlationId !== correlationId) return;
+        clearTimeout(timer);
+        sub.off('message', onMsg);
+        await sub.unsubscribe(myChan);
+        sub.disconnect();
+        await redis.del(pendingKey);
+        resolve(msg.data);
+      } catch (e) {}
+    };
+
+    sub.subscribe(myChan, () => sub.on('message', onMsg));
+  });
 }

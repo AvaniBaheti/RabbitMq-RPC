@@ -46,9 +46,9 @@ This project sets up a distributed system where HTTP workers communicate through
 
 5. Start the app:
 
-      npm run worker
-
-      npm run dev
+         npm run worker
+   
+         npm run dev
    
    This will start the server with workers based on the available CPU cores.
 
@@ -60,7 +60,7 @@ This endpoint takes a JSON payload and performs computation.
 
 #### Request Example
 
-1. For upper case:
+1. For sum of n numbers:
 
         curl -X POST http://localhost:3000/compute \
          -H "Content-Type: application/json" \
@@ -69,7 +69,7 @@ This endpoint takes a JSON payload and performs computation.
         "n": 1000
         }'
 
-2. For sum of n numbers:
+2. For upper case:
 
         curl -X POST http://localhost:3000/compute \
          -H "Content-Type: application/json" \
